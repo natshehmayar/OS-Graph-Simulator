@@ -2,7 +2,7 @@ milestone1:
 	gcc dijkstra.c -o dijkstra
 
 milestone2:
-	gcc dijkstra.c -o sim
+	gcc gui.c -o sim -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
 
 clean:
 	rm -f dijkstra sim

@@ -76,8 +76,13 @@ void drawArrow(float startX, float startY, float endX, float endY) {
     DrawTriangle(tip, left, right, BLACK);
 }
 
-int main() {
-    FILE *fp = fopen("input.txt", "r");
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Usage: ./sim input.txt\n");
+        return 1;
+    }
+
+    FILE *fp = fopen(argv[1], "r");
 
     if (fp == NULL) {
         printf("file error\n");
