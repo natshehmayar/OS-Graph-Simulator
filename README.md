@@ -81,3 +81,118 @@ make milestone1
 ```
 ./dijkstra input.txt
 ```
+
+---
+
+# Milestone 2: Graph Visualization
+
+## Overview
+
+This milestone adds a visual representation of the graph using Raylib.
+
+The program displays the graph vertices and edges on the screen.
+Each vertex is shown as a circle with its number, and each edge is shown as a directed line between two vertices.
+
+## Features
+
+* Draws all graph vertices
+* Draws all directed weighted edges
+* Displays edge weights
+* Displays the start and end vertices
+
+## Code Explanation
+
+The graph is stored using an array of edges.
+Each edge contains a source vertex, destination vertex, and weight.
+
+The function `calculatePositions()` places the vertices in a circular layout so the graph is readable.
+
+The function `drawArrow()` draws each directed edge as an arrow and displays the edge direction clearly.
+
+## Compilation and Run
+
+### Compile
+
+```bash
+make milestone2
+```
+
+### Run
+
+```bash
+./sim input.txt
+```
+
+---
+
+# Milestone 3: Shortest Path Animation
+
+## Overview
+
+This milestone adds animation to the graph visualization.
+
+An object moves along the shortest path from the start vertex to the destination vertex.
+
+The movement is based on the edge weights, so larger weights take more animation steps than smaller weights.
+
+## Features
+
+* Adds a Play / Stop button
+* Animates an object along the shortest path
+* Highlights the shortest path in green
+* Movement follows the shortest path found by Dijkstra's Algorithm
+* Edge weights affect the animation progress
+* The animation stops when the destination vertex is reached
+
+## Code Explanation
+
+The animation uses the shortest path stored in `shortestPath`.
+
+The shortest path is highlighted in green to show the route used by the moving object.
+
+The moving object starts at the source vertex using `entityX` and `entityY`.
+
+The Play / Stop button changes the value of `isPlaying`.
+
+For each edge in the shortest path, the program finds the edge weight.
+The weight controls the number of animation jumps.
+
+This means an edge with weight `W` is divided into `W` equal jumps.
+
+Each jump happens every 300 milliseconds.
+When the object reaches an intermediate vertex, it waits for one second before continuing.
+
+The graph remains visible during the animation.
+
+When the destination is reached, the animation stops and the message `Arrived at destination!` is displayed.
+
+## Compilation and Run
+
+### Compile
+
+```bash
+make milestone3
+```
+
+### Run
+
+```bash
+./sim input.txt
+```
+
+---
+
+## Technologies Used
+
+* C Programming Language
+* Raylib Graphics Library
+* Dijkstra's Algorithm
+* Makefile
+
+## Notes
+
+* The graph is directed and weighted.
+* Negative weights are considered invalid input.
+* The program supports up to 15 vertices.
+* Milestone 2 displays the graph statically.
+* Milestone 3 adds interactive animation.
