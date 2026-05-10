@@ -3,9 +3,9 @@
 ## Team Members
 
 * Mayar Natsheh
-* Toleen
-* Layan
-* Nawal
+* Toleen Maswadeh
+* Layan Rabba
+* Nawal Dwaik
 
 ## Overview
 
