@@ -146,7 +146,7 @@ The movement is based on the edge weights, so larger weights take more animation
 
 ## Code Explanation
 
-The animation uses the shortest path stored in `shortestPath`.
+The animation uses the shortest path stored in `travelers[t].shortestPath`.
 
 The shortest path is highlighted in green to show the route used by the moving object.
 
@@ -196,3 +196,86 @@ make milestone3
 * The program supports up to 15 vertices.
 * Milestone 2 displays the graph statically.
 * Milestone 3 adds interactive animation.
+
+# Milestone 4: Multiple Processes and Parent Process
+
+## Overview
+
+This milestone extends the project from a single traveler to multiple travelers moving simultaneously on the graph.
+
+The program uses multiple processes created with `fork()`.
+
+A parent process manages the graphical interface and computes the shortest paths, while each child process represents a traveler.
+
+The parent process is responsible for displaying all travelers on the graph and controlling their movement according to the paths computed by Dijkstra's Algorithm.
+
+---
+
+## Features
+
+* Supports multiple travelers at the same time
+* Uses `fork()` to create a child process for each traveler
+* Parent process computes the shortest path for every traveler
+* Each traveler is displayed with a different color
+* All travelers move simultaneously on the graph
+* Child processes print their PID when created
+* Parent process terminates child processes when their journey is complete
+* Parent process waits for all children before exiting
+
+---
+
+## Input Format
+
+### Graph Definition
+
+```text
+N M
+src dst weight
+src dst weight
+...
+```
+
+### Travelers
+
+```text
+travelerCount
+source destination
+source destination
+...
+```
+
+## Compilation and Run
+
+### Compile
+
+```bash
+make milestone4
+```
+
+### Run
+
+```bash
+./sim input.txt
+```
+
+---
+
+## Technologies Used
+
+* C Programming Language
+* Raylib Graphics Library
+* Dijkstra's Algorithm
+* Process Management (`fork`, `kill`, `waitpid`)
+* Makefile
+
+---
+
+## Notes
+
+* Each traveler has an independent shortest path.
+* Travelers are displayed using different colors.
+* All animations occur concurrently.
+* Child processes do not compute paths in this milestone.
+* The parent process performs all path calculations.
+* Child processes are introduced in preparation for IPC in Milestone 5.
+  
