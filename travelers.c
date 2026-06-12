@@ -5,6 +5,7 @@
 #include <unistd.h>     // fork(), sleep()
 #include <sys/wait.h>   // waitpid()
 #include <signal.h>     // kill()
+#include <fcntl.h>
 
 #define MAX_NODES 20
 #define MAX_EDGES 100
@@ -44,9 +45,18 @@ typedef struct {
     Color color; // a unique color for every traveler
 } Traveler;
 
+typedef struct {
+    int travelerIndex;
+    int currentNode;
+    int nextNode;
+    int finished;
+    pid_t pid;
+} Message;
+
 Edge edges[MAX_EDGES];
 Position positions[MAX_NODES];
 Traveler travelers[MAX_TRAVELERS];
+int pipes[MAX_TRAVELERS][2];
 
 int nodeCount;
 int edgeCount;
@@ -198,6 +208,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    for (int i = 0; i < travelerCount; i++) {
+        if (pipe(pipes[i]) == -1) {
+            perror("pipe");
+            return 1;
+        }
+    }
+
     // --- יצירת תהליכי הבנים (Fork Processes) ---
     for (int i = 0; i < travelerCount; i++) {
         pid_t pid = fork();
@@ -206,26 +223,70 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         if (pid == 0) {
+            close(pipes[i][0]);
+
             //  (Child Process)
-            printf("[%d] started\n", getpid()); // הדפסה נדרשת בטרמינל
-            fflush(stdout);
+            // printf("[%d] started\n", getpid());
+            // fflush(stdout);
+
+            for (int p = 0; p < travelers[i].pathLength; p++) {
+
+                Message msg;
+
+                msg.travelerIndex = i;
+                msg.currentNode = travelers[i].shortestPath[p];
+
+                if (p < travelers[i].pathLength - 1)
+                    msg.nextNode = travelers[i].shortestPath[p + 1];
+                else
+                    msg.nextNode = -1;
+
+                msg.finished = (p == travelers[i].pathLength - 1);
+                msg.pid = getpid();
+
+                write(pipes[i][1], &msg, sizeof(Message));
+
+                sleep(1);
+            }
+            close(pipes[i][1]);
 
             while (1) {
                 sleep(1);
             }
             exit(0);
         } else {
+            close(pipes[i][1]);
+            fcntl(pipes[i][0], F_SETFL, O_NONBLOCK);
+
+
              // Parent process code stores the PID of the child
             travelers[i].pid = pid;
         }
     }
 
     // The father is running the GUI and managing the game
-    InitWindow(1000, 700, "Milestone 4 - Multi-Process Travelers");
+    InitWindow(1000, 700, "Milestone 5 - IPC Travelers");
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
         Rectangle button = {40, 30, 120, 40};
+
+        for (int i = 0; i < travelerCount; i++) {
+            Message msg;
+
+            if (read(pipes[i][0], &msg, sizeof(Message)) > 0) {
+                if (msg.nextNode != -1)
+                    printf("[PID=%d] arrived at node %d | next node: %d\n",
+                           msg.pid, msg.currentNode, msg.nextNode);
+                else {
+                    printf("[PID=%d] arrived at node %d | DESTINATION\n",
+                           msg.pid, msg.currentNode);
+                    printf("[PID=%d] finished\n", msg.pid);
+                }
+                fflush(stdout);
+            }
+        }
+
 
         if (CheckCollisionPointRec(GetMousePosition(), button) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             isPlaying = !isPlaying;
@@ -306,7 +367,7 @@ int main(int argc, char *argv[]) {
         DrawRectangleLinesEx(button, 2, DARKGRAY);
         DrawText(isPlaying ? "STOP" : "PLAY", 75, 40, 22, BLACK);
 
-        DrawText("Multi-Process Simulation (Milestone 4)", 230, 30, 28, DARKBLUE);
+        DrawText("IPC Simulation (Milestone 5)", 230, 30, 28, DARKBLUE);
 
         // Drawing lines (edges) and weights
         for (int i = 0; i < edgeCount; i++) {
