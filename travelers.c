@@ -188,24 +188,22 @@ int main(int argc, char *argv[]) {
         travelers[i].animationFinished = 0;
         travelers[i].color = travelerColors[i % MAX_TRAVELERS];
 
-        // calculate the path in advance before (fork)
-        runDijkstraForTraveler(i);
+                // Milestone 5: child will calculate its own path
+        travelers[i].pathLength = 0;
 
-        if (travelers[i].pathLength > 0) {
-            travelers[i].entityX = positions[travelers[i].shortestPath[0]].x;
-            travelers[i].entityY = positions[travelers[i].shortestPath[0]].y;
-        }
     }
     fclose(fp);
 
     calculatePositions();
 
-// Update the correct initial coordinates after calculating the circular positions
+      // Initial positions are based on the source node.
+      // The child will calculate the path and send updates to the parent.
     for (int i = 0; i < travelerCount; i++) {
-        if (travelers[i].pathLength > 0) {
-            travelers[i].entityX = positions[travelers[i].shortestPath[0]].x;
-            travelers[i].entityY = positions[travelers[i].shortestPath[0]].y;
-        }
+        travelers[i].entityX = positions[travelers[i].sourceNode].x;
+        travelers[i].entityY = positions[travelers[i].sourceNode].y;
+
+        travelers[i].pathLength = 1;
+        travelers[i].shortestPath[0] = travelers[i].sourceNode;
     }
 
     for (int i = 0; i < travelerCount; i++) {
@@ -224,6 +222,8 @@ int main(int argc, char *argv[]) {
         }
         if (pid == 0) {
             close(pipes[i][0]);
+
+            runDijkstraForTraveler(i);
 
             //  (Child Process)
             // printf("[%d] started\n", getpid());
@@ -269,24 +269,35 @@ int main(int argc, char *argv[]) {
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
-        Rectangle button = {40, 30, 120, 40};
+       Rectangle button = {40, 30, 120, 40};
 
-        for (int i = 0; i < travelerCount; i++) {
-            Message msg;
+       for (int i = 0; i < travelerCount; i++) {
+          Message msg;
 
-            if (read(pipes[i][0], &msg, sizeof(Message)) > 0) {
-                if (msg.nextNode != -1)
-                    printf("[PID=%d] arrived at node %d | next node: %d\n",
-                           msg.pid, msg.currentNode, msg.nextNode);
-                else {
-                    printf("[PID=%d] arrived at node %d | DESTINATION\n",
-                           msg.pid, msg.currentNode);
-                    printf("[PID=%d] finished\n", msg.pid);
-                }
-                fflush(stdout);
+          if (read(pipes[i][0], &msg, sizeof(Message)) > 0) {
+            if (msg.nextNode != -1)
+                printf("[PID=%d] arrived at node %d | next node: %d\n",
+                       msg.pid, msg.currentNode, msg.nextNode);
+            else {
+                printf("[PID=%d] arrived at node %d | DESTINATION\n",
+                       msg.pid, msg.currentNode);
+                printf("[PID=%d] finished\n", msg.pid);
             }
-        }
 
+            int idx = msg.travelerIndex;
+
+            if (travelers[idx].pathLength < MAX_NODES) {
+                int last = travelers[idx].pathLength - 1;
+
+                if (last < 0 || travelers[idx].shortestPath[last] != msg.currentNode) {
+                    travelers[idx].shortestPath[travelers[idx].pathLength] = msg.currentNode;
+                    travelers[idx].pathLength++;
+                }
+            }
+
+            fflush(stdout);
+          }
+       }
 
         if (CheckCollisionPointRec(GetMousePosition(), button) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             isPlaying = !isPlaying;
