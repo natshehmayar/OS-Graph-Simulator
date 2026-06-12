@@ -278,4 +278,25 @@ make milestone4
 * Child processes do not compute paths in this milestone.
 * The parent process performs all path calculations.
 * Child processes are introduced in preparation for IPC in Milestone 5.
-  
+
+# Milestone 5: IPC Between Processes
+
+## IPC Mechanism
+
+The IPC tool used in this milestone is:
+
+* Unnamed Pipes
+
+### Why Pipes?
+
+* Simple communication between parent and child processes
+* Reliable message passing
+* Suitable for sending traveler location updates
+
+## Overview
+
+In this milestone each child process computes its own shortest path using Dijkstra's Algorithm.
+
+The child sends location updates through a Pipe.
+
+The parent process receives the messages, prints log information, and updates the GUI.
