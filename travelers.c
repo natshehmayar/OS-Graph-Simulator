@@ -6,6 +6,20 @@
 #include <sys/wait.h>   // waitpid()
 #include <signal.h>     // kill()
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <semaphore.h>
+#include <errno.h>
+
+#define STATUS_MOVING 0
+#define STATUS_WAITING 1
+#define STATUS_ENTERED 2
+#define STATUS_FINISHED 3
+
+#define GUI_STATUS_READY 0
+#define GUI_STATUS_MOVING 1
+#define GUI_STATUS_WAITING 2
+#define GUI_STATUS_INSIDE 3
+#define GUI_STATUS_FINISHED 4
 
 #define MAX_NODES 20
 #define MAX_EDGES 100
@@ -39,9 +53,17 @@ typedef struct {
     int currentJump;
     float entityX;
     float entityY;
-    int isWaiting;
-    double waitStartTime;
     int animationFinished;
+    int waitingForNode;
+    int movingFromNode;
+    int movingToNode;
+    int insideNode;
+    int guiStatus;
+    double insideStartTime;
+    int insideReleaseSent;
+    int leaveAckSent;
+    double waitingStartTime;
+    int waitingAckSent;
     Color color; // a unique color for every traveler
 } Traveler;
 
@@ -51,24 +73,111 @@ typedef struct {
     int nextNode;
     int finished;
     pid_t pid;
+    int status;
 } Message;
 
 Edge edges[MAX_EDGES];
 Position positions[MAX_NODES];
 Traveler travelers[MAX_TRAVELERS];
 int pipes[MAX_TRAVELERS][2];
+sem_t *nodeLocks;
+sem_t *leaveSync;
+sem_t *outsideSync;
+sem_t *waitShownSync;
+sem_t *insideDoneSync;
+sem_t *childrenReady;
 
 int nodeCount;
 int edgeCount;
 int travelerCount; // number of travelers (sons)
 
 int isPlaying = 0;
+int startSent = 0;
+volatile sig_atomic_t startFlag = 0;
+
+void startHandler(int sig) {
+    startFlag = 1;
+}
 double lastMoveTime = 0;
 
 // color matrix for distinguishing travelers
 Color travelerColors[MAX_TRAVELERS] = {
     ORANGE, GOLD, LIME, MAROON, PURPLE, VIOLET, DARKGREEN, PINK, MAGENTA, BEIGE
 };
+
+const char *statusText(int status) {
+    switch (status) {
+        case GUI_STATUS_MOVING:
+            return "MOVING";
+        case GUI_STATUS_WAITING:
+            return "WAITING";
+        case GUI_STATUS_INSIDE:
+            return "INSIDE NODE";
+        case GUI_STATUS_FINISHED:
+            return "FINISHED";
+        default:
+            return "READY";
+    }
+}
+
+void waitSemaphore(sem_t *sem) {
+    while (sem_wait(sem) == -1 && errno == EINTR) {
+    }
+}
+
+void sendMessage(int pipeFd, int travelerIndex, int currentNode, int nextNode, int status, int finished) {
+    Message msg;
+
+    msg.travelerIndex = travelerIndex;
+    msg.currentNode = currentNode;
+    msg.nextNode = nextNode;
+    msg.finished = finished;
+    msg.pid = getpid();
+    msg.status = status;
+
+    write(pipeFd, &msg, sizeof(Message));
+}
+
+sem_t *createSemaphoreArray(int count, int initialValue, const char *name) {
+    sem_t *array = mmap(NULL,
+                 sizeof(sem_t) * count,
+                 PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_ANONYMOUS,
+                 -1,
+                 0);
+
+    if (array == MAP_FAILED) {
+        perror(name);
+        return NULL;
+    }
+
+    for (int i = 0; i < count; i++) {
+        if (sem_init(&array[i], 1, initialValue) == -1) {
+            perror(name);
+            return NULL;
+        }
+    }
+
+    return array;
+}
+
+Position outsideNodePosition(int currentNode, int nextNode) {
+    Position outside = positions[nextNode];
+    float sx = positions[currentNode].x;
+    float sy = positions[currentNode].y;
+    float tx = positions[nextNode].x;
+    float ty = positions[nextNode].y;
+    float dx = tx - sx;
+    float dy = ty - sy;
+    float len = sqrtf(dx * dx + dy * dy);
+
+    if (len > 0) {
+        outside.x = tx - (dx / len) * (NODE_RADIUS + 12);
+        outside.y = ty - (dy / len) * (NODE_RADIUS + 12);
+    }
+
+    return outside;
+}
 
 void calculatePositions() {
     float centerX = 500;
@@ -184,8 +293,17 @@ int main(int argc, char *argv[]) {
         // set defult values for each traveler
         travelers[i].currentPathIndex = 0;
         travelers[i].currentJump = 0;
-        travelers[i].isWaiting = 0;
         travelers[i].animationFinished = 0;
+        travelers[i].waitingForNode = -1;
+        travelers[i].movingFromNode = -1;
+        travelers[i].movingToNode = -1;
+        travelers[i].insideNode = -1;
+        travelers[i].guiStatus = GUI_STATUS_READY;
+        travelers[i].insideStartTime = 0;
+        travelers[i].insideReleaseSent = 0;
+        travelers[i].leaveAckSent = 0;
+        travelers[i].waitingStartTime = 0;
+        travelers[i].waitingAckSent = 0;
         travelers[i].color = travelerColors[i % MAX_TRAVELERS];
 
                 // Milestone 5: child will calculate its own path
@@ -196,9 +314,58 @@ int main(int argc, char *argv[]) {
 
     calculatePositions();
 
+    nodeLocks = mmap(NULL,
+                 sizeof(sem_t) * nodeCount,
+                 PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_ANONYMOUS,
+                 -1,
+                 0);
+
+    if (nodeLocks == MAP_FAILED) {
+        perror("mmap");
+        return 1;
+    }
+
+    for (int i = 0; i < nodeCount; i++) {
+        if (sem_init(&nodeLocks[i], 1, 1) == -1) {
+            perror("sem_init");
+            return 1;
+        }
+    }
+
+    /* Per-traveler sync semaphores. Each protocol step has its own semaphore
+       so acknowledgements from one node cannot accidentally unlock another. */
+    leaveSync = createSemaphoreArray(travelerCount, 0, "leaveSync");
+    outsideSync = createSemaphoreArray(travelerCount, 0, "outsideSync");
+    waitShownSync = createSemaphoreArray(travelerCount, 0, "waitShownSync");
+    insideDoneSync = createSemaphoreArray(travelerCount, 0, "insideDoneSync");
+
+    if (leaveSync == NULL || outsideSync == NULL ||
+        waitShownSync == NULL || insideDoneSync == NULL) {
+        return 1;
+    }
+
+    childrenReady = mmap(NULL,
+                 sizeof(sem_t),
+                 PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_ANONYMOUS,
+                 -1,
+                 0);
+
+    if (childrenReady == MAP_FAILED) {
+        perror("mmap childrenReady");
+        return 1;
+    }
+
+    if (sem_init(childrenReady, 1, 0) == -1) {
+        perror("sem_init childrenReady");
+        return 1;
+    }
+
       // Initial positions are based on the source node.
       // The child will calculate the path and send updates to the parent.
     for (int i = 0; i < travelerCount; i++) {
+
         travelers[i].entityX = positions[travelers[i].sourceNode].x;
         travelers[i].entityY = positions[travelers[i].sourceNode].y;
 
@@ -221,38 +388,85 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         if (pid == 0) {
-            close(pipes[i][0]);
+            sigset_t startMask;
+            sigset_t oldMask;
+
+            for (int p = 0; p < travelerCount; p++) {
+                close(pipes[p][0]);
+                if (p != i) {
+                    close(pipes[p][1]);
+                }
+            }
+
+            sigemptyset(&startMask);
+            sigaddset(&startMask, SIGUSR1);
+            sigprocmask(SIG_BLOCK, &startMask, &oldMask);
+            signal(SIGUSR1, startHandler);
 
             runDijkstraForTraveler(i);
+            sem_post(childrenReady);
+
+            while (!startFlag) {
+                sigsuspend(&oldMask);
+            }
+            sigprocmask(SIG_UNBLOCK, &startMask, NULL);
 
             //  (Child Process)
             // printf("[%d] started\n", getpid());
             // fflush(stdout);
 
-            for (int p = 0; p < travelers[i].pathLength; p++) {
+            if (travelers[i].pathLength == 0) {
+                sendMessage(pipes[i][1], i, travelers[i].sourceNode, -1, STATUS_FINISHED, 1);
+                close(pipes[i][1]);
+                exit(0);
+            }
 
-                Message msg;
+            int currentNode = travelers[i].shortestPath[0];
 
-                msg.travelerIndex = i;
-                msg.currentNode = travelers[i].shortestPath[p];
+            if (sem_trywait(&nodeLocks[currentNode]) == -1) {
+                sendMessage(pipes[i][1], i, currentNode, currentNode, STATUS_WAITING, 0);
+                waitSemaphore(&waitShownSync[i]);
+                waitSemaphore(&nodeLocks[currentNode]);
+            }
 
-                if (p < travelers[i].pathLength - 1)
-                    msg.nextNode = travelers[i].shortestPath[p + 1];
-                else
-                    msg.nextNode = -1;
+            sendMessage(pipes[i][1], i, currentNode, currentNode, STATUS_ENTERED, travelers[i].pathLength <= 1);
+            waitSemaphore(&insideDoneSync[i]);
 
-                msg.finished = (p == travelers[i].pathLength - 1);
-                msg.pid = getpid();
+            if (travelers[i].pathLength <= 1) {
+                sem_post(&nodeLocks[currentNode]);
+                sendMessage(pipes[i][1], i, currentNode, -1, STATUS_FINISHED, 1);
+                close(pipes[i][1]);
+                exit(0);
+            }
 
-                write(pipes[i][1], &msg, sizeof(Message));
+            for (int p = 0; p < travelers[i].pathLength - 1; p++) {
+                int nodeToEnter = travelers[i].shortestPath[p + 1];
+                int isLastNode = (p + 1 == travelers[i].pathLength - 1);
 
-                sleep(1);
+                sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_MOVING, 0);
+                waitSemaphore(&leaveSync[i]);
+                sem_post(&nodeLocks[currentNode]);
+                waitSemaphore(&outsideSync[i]);
+
+                if (sem_trywait(&nodeLocks[nodeToEnter]) == -1) {
+                    sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_WAITING, 0);
+                    waitSemaphore(&waitShownSync[i]);
+                    waitSemaphore(&nodeLocks[nodeToEnter]);
+                }
+
+                sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_ENTERED, isLastNode);
+                waitSemaphore(&insideDoneSync[i]);
+
+                if (isLastNode) {
+                    sem_post(&nodeLocks[nodeToEnter]);
+                    sendMessage(pipes[i][1], i, nodeToEnter, -1, STATUS_FINISHED, 1);
+                } else {
+                    currentNode = nodeToEnter;
+                }
             }
             close(pipes[i][1]);
 
-            while (1) {
-                sleep(1);
-            }
+            /* Child finished its path and exits cleanly. */
             exit(0);
         } else {
             close(pipes[i][1]);
@@ -264,8 +478,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    for (int i = 0; i < travelerCount; i++) {
+        waitSemaphore(childrenReady);
+    }
+
     // The father is running the GUI and managing the game
-    InitWindow(1000, 700, "Milestone 5 - IPC Travelers");
+    InitWindow(1000, 700, "Milestone 6 - Node Synchronization");
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
@@ -274,35 +492,86 @@ int main(int argc, char *argv[]) {
        for (int i = 0; i < travelerCount; i++) {
           Message msg;
 
-          if (read(pipes[i][0], &msg, sizeof(Message)) > 0) {
-            if (msg.nextNode != -1)
-                printf("[PID=%d] arrived at node %d | next node: %d\n",
-                       msg.pid, msg.currentNode, msg.nextNode);
-            else {
-                printf("[PID=%d] arrived at node %d | DESTINATION\n",
-                       msg.pid, msg.currentNode);
-                printf("[PID=%d] finished\n", msg.pid);
-            }
+          while (read(pipes[i][0], &msg, sizeof(Message)) == sizeof(Message)) {
+              int idx = msg.travelerIndex;
 
-            int idx = msg.travelerIndex;
+              if (msg.status == STATUS_MOVING) {
+                  printf("Traveler %d MOVING to node %d\n", idx, msg.nextNode);
 
-            if (travelers[idx].pathLength < MAX_NODES) {
-                int last = travelers[idx].pathLength - 1;
+                  travelers[idx].waitingForNode = -1;
+                  travelers[idx].movingFromNode = msg.currentNode;
+                  travelers[idx].movingToNode = msg.nextNode;
+                  travelers[idx].insideNode = -1;
+                  travelers[idx].guiStatus = GUI_STATUS_MOVING;
+                  travelers[idx].insideReleaseSent = 0;
+                  travelers[idx].leaveAckSent = 0;
+                  travelers[idx].waitingAckSent = 0;
 
-                if (last < 0 || travelers[idx].shortestPath[last] != msg.currentNode) {
-                    travelers[idx].shortestPath[travelers[idx].pathLength] = msg.currentNode;
-                    travelers[idx].pathLength++;
-                }
-            }
+                  if (msg.nextNode != -1 && travelers[idx].pathLength < MAX_NODES) {
+                      int last = travelers[idx].pathLength - 1;
 
-            fflush(stdout);
+                      if (travelers[idx].shortestPath[last] != msg.nextNode) {
+                          travelers[idx].shortestPath[travelers[idx].pathLength] = msg.nextNode;
+                          travelers[idx].pathLength++;
+                      }
+                  }
+              } else if (msg.status == STATUS_WAITING) {
+                  Position outside = outsideNodePosition(msg.currentNode, msg.nextNode);
+
+                  travelers[idx].waitingForNode = msg.nextNode;
+                  travelers[idx].movingFromNode = msg.currentNode;
+                  travelers[idx].movingToNode = -1;
+                  travelers[idx].insideNode = -1;
+                  travelers[idx].guiStatus = GUI_STATUS_WAITING;
+                  travelers[idx].waitingStartTime = GetTime();
+                  travelers[idx].waitingAckSent = 0;
+                  travelers[idx].entityX = outside.x;
+                  travelers[idx].entityY = outside.y;
+
+                  printf("Traveler %d WAITING outside node %d\n", idx, msg.nextNode);
+              } else if (msg.status == STATUS_ENTERED) {
+                  travelers[idx].waitingForNode = -1;
+                  travelers[idx].movingFromNode = -1;
+                  travelers[idx].movingToNode = -1;
+                  travelers[idx].insideNode = msg.nextNode;
+                  travelers[idx].guiStatus = GUI_STATUS_INSIDE;
+                  travelers[idx].insideStartTime = GetTime();
+                  travelers[idx].insideReleaseSent = 0;
+                  travelers[idx].waitingAckSent = 0;
+                  travelers[idx].entityX = positions[msg.nextNode].x;
+                  travelers[idx].entityY = positions[msg.nextNode].y;
+
+                  printf("Traveler %d ENTERED node %d%s\n",
+                         idx, msg.nextNode, msg.finished ? " (destination)" : "");
+              } else if (msg.status == STATUS_FINISHED) {
+                  travelers[idx].waitingForNode = -1;
+                  travelers[idx].movingFromNode = -1;
+                  travelers[idx].movingToNode = -1;
+                  travelers[idx].insideNode = -1;
+                  travelers[idx].guiStatus = GUI_STATUS_FINISHED;
+                  travelers[idx].animationFinished = 1;
+
+                  if (msg.currentNode >= 0) {
+                      travelers[idx].entityX = positions[msg.currentNode].x;
+                      travelers[idx].entityY = positions[msg.currentNode].y;
+                  }
+
+                  printf("[PID=%d] finished\n", msg.pid);
+              }
+
+              fflush(stdout);
           }
        }
 
         if (CheckCollisionPointRec(GetMousePosition(), button) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             isPlaying = !isPlaying;
-            if (isPlaying) {
+            if (isPlaying && !startSent) {
                 lastMoveTime = GetTime();
+
+                for (int j = 0; j < travelerCount; j++) {
+                    kill(travelers[j].pid, SIGUSR1);
+                }
+                startSent = 1;
             }
         }
 
@@ -312,24 +581,39 @@ int main(int argc, char *argv[]) {
             int allFinished = 1;
 
             for (int i = 0; i < travelerCount; i++) {
-                if (travelers[i].animationFinished || travelers[i].pathLength <= 1) {
+                if (!travelers[i].animationFinished) {
+                    allFinished = 0;
+                }
+
+                if (travelers[i].guiStatus == GUI_STATUS_INSIDE &&
+                    !travelers[i].insideReleaseSent &&
+                    currentTime - travelers[i].insideStartTime >= 1.0) {
+                    travelers[i].insideReleaseSent = 1;
+                    printf("Traveler %d LEAVING node %d\n", i, travelers[i].insideNode);
+                    fflush(stdout);
+                    sem_post(&insideDoneSync[i]);
+                }
+
+                if (travelers[i].guiStatus == GUI_STATUS_WAITING &&
+                    !travelers[i].waitingAckSent &&
+                    currentTime - travelers[i].waitingStartTime >= 0.2) {
+                    travelers[i].waitingAckSent = 1;
+                    sem_post(&waitShownSync[i]);
+                }
+
+                if (travelers[i].animationFinished ||
+                    travelers[i].movingFromNode == -1 ||
+                    travelers[i].movingToNode == -1) {
                     continue;
                 }
-                allFinished = 0; // There is at least one traveler who has not yet finished
-
-                // The logic of waiting at the station (1 second per passenger)
-                if (travelers[i].isWaiting) {
-                    if (currentTime - travelers[i].waitStartTime >= 1.0) {
-                        travelers[i].isWaiting = 0;
-                    } else {
-                        continue;
-                    }
+                if (travelers[i].waitingForNode != -1) {
+                    continue;
                 }
 
                 // The logic of the movement is every 300 milliseconds (0.3 seconds)
                 if (currentTime - lastMoveTime >= 0.3) {
-                    int src = travelers[i].shortestPath[travelers[i].currentPathIndex];
-                    int dst = travelers[i].shortestPath[travelers[i].currentPathIndex + 1];
+                    int src = travelers[i].movingFromNode;
+                    int dst = travelers[i].movingToNode;
                     int edgeWeight = 1;
 
                     for (int e = 0; e < edgeCount; e++) {
@@ -341,22 +625,28 @@ int main(int argc, char *argv[]) {
 
                     travelers[i].currentJump++;
                     float t = (float)travelers[i].currentJump / edgeWeight;
+                    Position outside = outsideNodePosition(src, dst);
 
-                    travelers[i].entityX = positions[src].x + t * (positions[dst].x - positions[src].x);
-                    travelers[i].entityY = positions[src].y + t * (positions[dst].y - positions[src].y);
+                    travelers[i].entityX = positions[src].x + t * (outside.x - positions[src].x);
+                    travelers[i].entityY = positions[src].y + t * (outside.y - positions[src].y);
+
+                    if (!travelers[i].leaveAckSent) {
+                        travelers[i].leaveAckSent = 1;
+                        sem_post(&leaveSync[i]);
+                    }
 
                     if (travelers[i].currentJump >= edgeWeight) {
-                        travelers[i].currentPathIndex++;
-                        travelers[i].currentJump = 0;
-
-                        if (travelers[i].currentPathIndex >= travelers[i].pathLength - 1) {
-                            travelers[i].animationFinished = 1;
-                            // Upon the traveler's arrival at the destination, the father sends a signal to finalize the son's process
-                            kill(travelers[i].pid, SIGKILL);
-                        } else {
-                            travelers[i].isWaiting = 1;
-                            travelers[i].waitStartTime = currentTime;
+                        if (travelers[i].currentPathIndex < travelers[i].pathLength - 1 &&
+                            travelers[i].shortestPath[travelers[i].currentPathIndex + 1] == dst) {
+                            travelers[i].currentPathIndex++;
                         }
+                        travelers[i].currentJump = 0;
+                        travelers[i].movingFromNode = -1;
+                        travelers[i].movingToNode = -1;
+                        travelers[i].entityX = outside.x;
+                        travelers[i].entityY = outside.y;
+
+                        sem_post(&outsideSync[i]);
                     }
                 }
             }
@@ -365,7 +655,7 @@ int main(int argc, char *argv[]) {
                 lastMoveTime = currentTime;
             }
 
-            if (allFinished) {
+            if (startSent && allFinished) {
                 isPlaying = 0;
             }
         }
@@ -378,7 +668,8 @@ int main(int argc, char *argv[]) {
         DrawRectangleLinesEx(button, 2, DARKGRAY);
         DrawText(isPlaying ? "STOP" : "PLAY", 75, 40, 22, BLACK);
 
-        DrawText("IPC Simulation (Milestone 5)", 230, 30, 28, DARKBLUE);
+        DrawText("IPC Simulation (Milestone 6)", 230, 30, 28, DARKBLUE);
+        DrawText("BLACK / WAIT = Waiting outside node", 600, 30, 20, BLACK);
 
         // Drawing lines (edges) and weights
         for (int i = 0; i < edgeCount; i++) {
@@ -409,16 +700,28 @@ int main(int argc, char *argv[]) {
         // Draw all the moving objects (each object in its own color)
         for (int i = 0; i < travelerCount; i++) {
             if (travelers[i].pathLength > 0) {
-                DrawCircle(travelers[i].entityX, travelers[i].entityY, 14, travelers[i].color);
+
+                Color drawColor = travelers[i].color;
+
+                if (travelers[i].waitingForNode != -1) {
+                    drawColor = BLACK;
+                }
+
+                DrawCircle(travelers[i].entityX, travelers[i].entityY, 14, drawColor);
+
+                if (travelers[i].waitingForNode != -1) {
+                    DrawText("WAIT", travelers[i].entityX - 20, travelers[i].entityY - 35, 14, RED);
+                }
+
                 DrawCircleLines(travelers[i].entityX, travelers[i].entityY, 14, BLACK);
             }
         }
 
         // Display a small side panel showing the status of each child (PID)
-        DrawRectangle(40, 90, 220, travelerCount * 25 + 10, Fade(LIGHTGRAY, 0.8f));
+        DrawRectangle(40, 90, 320, travelerCount * 25 + 10, Fade(LIGHTGRAY, 0.8f));
         for (int i = 0; i < travelerCount; i++) {
             DrawCircle(55, 105 + i * 25, 7, travelers[i].color);
-            DrawText(TextFormat("Child PID: %d %s", travelers[i].pid, travelers[i].animationFinished ? "(Arrived)" : ""), 70, 95 + i * 25, 16, BLACK);
+            DrawText(TextFormat("PID: %d  %s", travelers[i].pid, statusText(travelers[i].guiStatus)), 70, 95 + i * 25, 16, BLACK);
         }
 
         EndDrawing();
@@ -426,12 +729,37 @@ int main(int argc, char *argv[]) {
 
     CloseWindow();
 
-    //  (Zombie Processes)
     for (int i = 0; i < travelerCount; i++) {
-        kill(travelers[i].pid, SIGKILL); // To confirm
+        if (!travelers[i].animationFinished) {
+            kill(travelers[i].pid, SIGTERM);
+        }
+    }
+
+    // Wait for all children before releasing shared synchronization objects.
+    for (int i = 0; i < travelerCount; i++) {
         waitpid(travelers[i].pid, NULL, 0);
     }
+
+    for (int i = 0; i < nodeCount; i++) {
+        sem_destroy(&nodeLocks[i]);
+    }
+
+    for (int i = 0; i < travelerCount; i++) {
+        sem_destroy(&leaveSync[i]);
+        sem_destroy(&outsideSync[i]);
+        sem_destroy(&waitShownSync[i]);
+        sem_destroy(&insideDoneSync[i]);
+    }
+    sem_destroy(childrenReady);
+
+    munmap(nodeLocks, sizeof(sem_t) * nodeCount);
+    munmap(leaveSync, sizeof(sem_t) * travelerCount);
+    munmap(outsideSync, sizeof(sem_t) * travelerCount);
+    munmap(waitShownSync, sizeof(sem_t) * travelerCount);
+    munmap(insideDoneSync, sizeof(sem_t) * travelerCount);
+    munmap(childrenReady, sizeof(sem_t));
 
     printf("Parent Process finished safely.\n");
     return 0;
 }
+
