@@ -6,6 +6,7 @@
 #include <sys/wait.h>   // waitpid()
 #include <signal.h>     // kill()
 #include <fcntl.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <semaphore.h>
 #include <errno.h>
@@ -20,6 +21,7 @@
 #define GUI_STATUS_WAITING 2
 #define GUI_STATUS_INSIDE 3
 #define GUI_STATUS_FINISHED 4
+
 
 #define MAX_NODES 20
 #define MAX_EDGES 100
@@ -89,7 +91,14 @@ sem_t *childrenReady;
 
 int nodeCount;
 int edgeCount;
-int travelerCount; // number of travelers (sons)
+int travelerCount;// number of travelers (sons)
+
+typedef enum {
+    SCHED_FCFS,
+    SCHED_SJF
+} SchedulerType;
+
+SchedulerType schedulerType;
 
 int isPlaying = 0;
 int startSent = 0;
@@ -269,13 +278,49 @@ void runDijkstraForTraveler(int tIdx) {
     }
 }
 
+int parse_scheduler_type(int argc, char *argv[], char **fileName) {
+    if (argc != 4) {
+        printf("Usage: ./sim -schd fcfs <file_name>\n");
+        printf("Usage: ./sim -schd sjf <file_name>\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "-schd") != 0) {
+        printf("Error: missing -schd option\n");
+        return 0;
+    }
+
+    if (strcmp(argv[2], "fcfs") == 0) {
+        schedulerType = SCHED_FCFS;
+    } else if (strcmp(argv[2], "sjf") == 0) {
+        schedulerType = SCHED_SJF;
+    } else {
+        printf("Error: unknown scheduler type\n");
+        printf("Use: fcfs or sjf\n");
+        return 0;
+    }
+
+    *fileName = argv[3];
+    return 1;
+}
+
+const char* getSchedulerName() {
+    if (schedulerType == SCHED_FCFS) {
+        return "FCFS";
+    }
+
+    return "SJF";
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        printf("Usage: ./sim input.txt\n");
+    char *fileName;
+
+    if (!parse_scheduler_type(argc, argv, &fileName)) {
         return 1;
     }
 
-    FILE *fp = fopen(argv[1], "r");
+    FILE *fp = fopen(fileName, "r");
+
     if (fp == NULL) {
         printf("file error\n");
         return 1;
@@ -668,8 +713,9 @@ int main(int argc, char *argv[]) {
         DrawRectangleLinesEx(button, 2, DARKGRAY);
         DrawText(isPlaying ? "STOP" : "PLAY", 75, 40, 22, BLACK);
 
-        DrawText("IPC Simulation (Milestone 6)", 230, 30, 28, DARKBLUE);
+        DrawText("IPC Simulation (Milestone 7)", 230, 30, 28, DARKBLUE);
         DrawText("BLACK / WAIT = Waiting outside node", 600, 30, 20, BLACK);
+        DrawText(TextFormat("Current Scheduler: %s", getSchedulerName()), 230, 65, 22, MAROON);
 
         // Drawing lines (edges) and weights
         for (int i = 0; i < edgeCount; i++) {
