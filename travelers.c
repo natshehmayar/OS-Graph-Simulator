@@ -10,6 +10,8 @@
 #include <sys/mman.h>
 #include <semaphore.h>
 #include <errno.h>
+#include "scheduler.h"
+
 
 #define STATUS_MOVING 0
 #define STATUS_WAITING 1
@@ -79,22 +81,22 @@ typedef struct {
 } Message;
 
 // Milestone 7 : waiting queue item for each intersection
-typedef struct QueueNode {
-    int travelerIndex;
-    pid_t pid;
-    int currentNode;
-    int requestedNode;
-    double arrivalTime;
-    double waitingStartTime;
-    int remainingPath;
-    struct QueueNode *next;
-} QueueNode;
+// typedef struct QueueNode {
+//     int travelerIndex;
+//     pid_t pid;
+//     int currentNode;
+//     int requestedNode;
+//     double arrivalTime;
+//     double waitingStartTime;
+//     int remainingPath;
+//     struct QueueNode *next;
+// } QueueNode;
 
-typedef struct {
-    QueueNode *front;
-    QueueNode *rear;
-    int size;
-} IntersectionQueue;
+// typedef struct {
+//     QueueNode *front;
+//     QueueNode *rear;
+//     int size;
+// } IntersectionQueue;
 
 Edge edges[MAX_EDGES];
 Position positions[MAX_NODES];
@@ -107,15 +109,16 @@ sem_t *outsideSync;
 sem_t *waitShownSync;
 sem_t *insideDoneSync;
 sem_t *childrenReady;
+sem_t *schedulerSync;
 
 int nodeCount;
 int edgeCount;
 int travelerCount;// number of travelers (sons)
 
-typedef enum {
-    SCHED_FCFS,
-    SCHED_SJF
-} SchedulerType;
+// typedef enum {
+//     SCHED_FCFS,
+//     SCHED_SJF
+// } SchedulerType;
 
 SchedulerType schedulerType;
 
@@ -447,6 +450,24 @@ const char* getSchedulerName() {
     return "SJF";
 }
 
+void schedule_intersection(int intersection)
+{
+    IntersectionQueue *queue =
+        get_waiting_queue(intersection);
+
+    QueueNode *selected =
+        choose_next_process(queue, schedulerType);
+
+    if (selected != NULL)
+    {
+        printf(
+            "Scheduler selected traveler %d for node %d\n",
+            selected->travelerIndex,
+            intersection
+        );
+    }
+}
+
 int main(int argc, char *argv[]) {
     char *fileName;
 
@@ -520,9 +541,10 @@ int main(int argc, char *argv[]) {
     outsideSync = createSemaphoreArray(travelerCount, 0, "outsideSync");
     waitShownSync = createSemaphoreArray(travelerCount, 0, "waitShownSync");
     insideDoneSync = createSemaphoreArray(travelerCount, 0, "insideDoneSync");
+    schedulerSync = createSemaphoreArray(travelerCount, 0, "schedulerSync");
 
     if (leaveSync == NULL || outsideSync == NULL ||
-        waitShownSync == NULL || insideDoneSync == NULL) {
+        waitShownSync == NULL || insideDoneSync == NULL || schedulerSync == NULL) {
         return 1;
     }
 
@@ -936,6 +958,7 @@ int main(int argc, char *argv[]) {
         sem_destroy(&outsideSync[i]);
         sem_destroy(&waitShownSync[i]);
         sem_destroy(&insideDoneSync[i]);
+        sem_destroy(&schedulerSync[i]);
     }
     sem_destroy(childrenReady);
 
@@ -944,6 +967,7 @@ int main(int argc, char *argv[]) {
     munmap(outsideSync, sizeof(sem_t) * travelerCount);
     munmap(waitShownSync, sizeof(sem_t) * travelerCount);
     munmap(insideDoneSync, sizeof(sem_t) * travelerCount);
+    munmap(schedulerSync, sizeof(sem_t) * travelerCount);
     munmap(childrenReady, sizeof(sem_t));
 
     printf("Parent Process finished safely.\n");
