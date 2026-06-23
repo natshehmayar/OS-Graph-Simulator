@@ -78,9 +78,28 @@ typedef struct {
     int status;
 } Message;
 
+// Milestone 7 : waiting queue item for each intersection
+typedef struct QueueNode {
+    int travelerIndex;
+    pid_t pid;
+    int currentNode;
+    int requestedNode;
+    double arrivalTime;
+    double waitingStartTime;
+    int remainingPath;
+    struct QueueNode *next;
+} QueueNode;
+
+typedef struct {
+    QueueNode *front;
+    QueueNode *rear;
+    int size;
+} IntersectionQueue;
+
 Edge edges[MAX_EDGES];
 Position positions[MAX_NODES];
 Traveler travelers[MAX_TRAVELERS];
+IntersectionQueue intersectionQueues[MAX_NODES];
 int pipes[MAX_TRAVELERS][2];
 sem_t *nodeLocks;
 sem_t *leaveSync;
@@ -133,6 +152,122 @@ void waitSemaphore(sem_t *sem) {
     while (sem_wait(sem) == -1 && errno == EINTR) {
     }
 }
+
+
+void init_intersection_queues() {
+    for (int i = 0; i < MAX_NODES; i++) {
+        intersectionQueues[i].front = NULL;
+        intersectionQueues[i].rear = NULL;
+        intersectionQueues[i].size = 0;
+    }
+}
+
+int is_intersection_queue_empty(int intersection) {
+    if (intersection < 0 || intersection >= MAX_NODES) {
+        return 1;
+    }
+
+    return intersectionQueues[intersection].size == 0;
+}
+
+void add_to_intersection_queue(int intersection, int travelerIndex, int currentNode) {
+    if (intersection < 0 || intersection >= MAX_NODES) {
+        return;
+    }
+
+    QueueNode *newNode = malloc(sizeof(QueueNode));
+    if (newNode == NULL) {
+        perror("malloc queue node");
+        return;
+    }
+
+    newNode->travelerIndex = travelerIndex;
+    newNode->pid = travelers[travelerIndex].pid;
+    newNode->currentNode = currentNode;
+    newNode->requestedNode = intersection;
+    newNode->arrivalTime = GetTime();
+    newNode->waitingStartTime = GetTime();
+
+    newNode->remainingPath =
+        travelers[travelerIndex].pathLength - travelers[travelerIndex].currentPathIndex;
+
+    newNode->next = NULL;
+
+    if (intersectionQueues[intersection].rear == NULL) {
+        intersectionQueues[intersection].front = newNode;
+        intersectionQueues[intersection].rear = newNode;
+    } else {
+        intersectionQueues[intersection].rear->next = newNode;
+        intersectionQueues[intersection].rear = newNode;
+    }
+
+    intersectionQueues[intersection].size++;
+
+    printf("Traveler %d added to waiting queue of node %d. Queue size: %d\n",
+           travelerIndex, intersection, intersectionQueues[intersection].size);
+}
+
+int remove_from_intersection_queue(int intersection, int travelerIndex) {
+    if (intersection < 0 || intersection >= MAX_NODES) {
+        return 0;
+    }
+
+    QueueNode *current = intersectionQueues[intersection].front;
+    QueueNode *previous = NULL;
+
+    while (current != NULL) {
+        if (current->travelerIndex == travelerIndex) {
+            if (previous == NULL) {
+                intersectionQueues[intersection].front = current->next;
+            } else {
+                previous->next = current->next;
+            }
+
+            if (intersectionQueues[intersection].rear == current) {
+                intersectionQueues[intersection].rear = previous;
+            }
+
+            free(current);
+            intersectionQueues[intersection].size--;
+
+            printf("Traveler %d removed from waiting queue of node %d. Queue size: %d\n",
+                   travelerIndex, intersection, intersectionQueues[intersection].size);
+
+            return 1;
+        }
+
+        previous = current;
+        current = current->next;
+    }
+
+    return 0;
+}
+
+IntersectionQueue *get_waiting_queue(int intersection) {
+    if (intersection < 0 || intersection >= MAX_NODES) {
+        return NULL;
+    }
+
+    return &intersectionQueues[intersection];
+}
+
+void clear_intersection_queues() {
+    for (int i = 0; i < MAX_NODES; i++) {
+        QueueNode *current = intersectionQueues[i].front;
+
+        while (current != NULL) {
+            QueueNode *next = current->next;
+            free(current);
+            current = next;
+        }
+
+        intersectionQueues[i].front = NULL;
+        intersectionQueues[i].rear = NULL;
+        intersectionQueues[i].size = 0;
+    }
+}
+
+
 
 void sendMessage(int pipeFd, int travelerIndex, int currentNode, int nextNode, int status, int finished) {
     Message msg;
@@ -358,6 +493,7 @@ int main(int argc, char *argv[]) {
     fclose(fp);
 
     calculatePositions();
+    init_intersection_queues();
 
     nodeLocks = mmap(NULL,
                  sizeof(sem_t) * nodeCount,
@@ -563,6 +699,8 @@ int main(int argc, char *argv[]) {
               } else if (msg.status == STATUS_WAITING) {
                   Position outside = outsideNodePosition(msg.currentNode, msg.nextNode);
 
+                  add_to_intersection_queue(msg.nextNode, idx, msg.currentNode);
+
                   travelers[idx].waitingForNode = msg.nextNode;
                   travelers[idx].movingFromNode = msg.currentNode;
                   travelers[idx].movingToNode = -1;
@@ -575,6 +713,8 @@ int main(int argc, char *argv[]) {
 
                   printf("Traveler %d WAITING outside node %d\n", idx, msg.nextNode);
               } else if (msg.status == STATUS_ENTERED) {
+                  remove_from_intersection_queue(msg.nextNode, idx);
+
                   travelers[idx].waitingForNode = -1;
                   travelers[idx].movingFromNode = -1;
                   travelers[idx].movingToNode = -1;
@@ -774,6 +914,7 @@ int main(int argc, char *argv[]) {
     }
 
     CloseWindow();
+    clear_intersection_queues();
 
     for (int i = 0; i < travelerCount; i++) {
         if (!travelers[i].animationFinished) {
@@ -808,4 +949,3 @@ int main(int argc, char *argv[]) {
     printf("Parent Process finished safely.\n");
     return 0;
 }
-
