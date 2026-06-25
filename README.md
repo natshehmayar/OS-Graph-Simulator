@@ -462,3 +462,71 @@ make milestone6
 * Travelers waiting for a node are queued implicitly by the semaphore mechanism.
 * The GUI reflects both active and waiting states in real time.
 * The system prevents race conditions and ensures safe synchronization between processes.
+
+# Milestone 7: Scheduling Algorithms for Waiting Travelers
+
+## Overview
+
+This milestone introduces scheduling algorithms to manage travelers waiting to enter occupied nodes.
+
+Each node maintains a waiting queue. When multiple travelers are waiting, a scheduler selects which traveler gets access next.
+
+Supported scheduling algorithms:
+
+* FCFS (First-Come First-Served)
+* SJF (Shortest Job First)
+
+---
+
+## Features
+
+* Waiting queue for each node
+* FCFS scheduling
+* SJF scheduling
+* Runtime scheduler selection
+* Waiting time tracking for each traveler
+* Scheduler decisions displayed in the terminal
+* Waiting time statistics shown at the end of the simulation
+
+---
+
+## Compilation and Run
+
+### Compile
+
+```bash
+make milestone7
+```
+
+### Run
+
+```bash
+./sim -schd fcfs input.txt
+```
+
+or
+
+```bash
+./sim -schd sjf input.txt
+```
+
+---
+
+## Technologies Used
+
+* C Programming Language
+* Raylib Graphics Library
+* POSIX Semaphores
+* Pipes
+* Process Management (`fork`, `waitpid`)
+* FCFS Scheduling
+* SJF Scheduling
+
+---
+
+## Notes
+
+* FCFS serves travelers in arrival order.
+* SJF serves the traveler with the shortest next edge weight.
+* Waiting times are measured and displayed.
+* Scheduling works together with the node synchronization system from Milestone 6.
