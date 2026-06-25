@@ -139,6 +139,7 @@ Color travelerColors[MAX_TRAVELERS] = {
 
 IntersectionQueue *get_waiting_queue(int intersection);
 const char* getSchedulerName();
+int get_edge_weight(int src, int dst);
 
 const char *statusText(int status) {
     switch (status) {
@@ -195,8 +196,7 @@ void add_to_intersection_queue(int intersection, int travelerIndex, int currentN
     newNode->arrivalTime = GetTime();
     newNode->waitingStartTime = GetTime();
 
-    newNode->remainingPath =
-        travelers[travelerIndex].pathLength - travelers[travelerIndex].currentPathIndex;
+    newNode->remainingPath = get_edge_weight(currentNode, intersection);
 
     newNode->next = NULL;
 
@@ -222,36 +222,6 @@ int get_edge_weight(int src, int dst) {
     }
 
     return INF;
-}
-
-int select_next_traveler_from_queue(int intersection) {
-    IntersectionQueue *queue = get_waiting_queue(intersection);
-
-    if (queue == NULL || queue->front == NULL) {
-        return -1;
-    }
-
-    QueueNode *current = queue->front;
-    QueueNode *best = current;
-
-    if (schedulerType == SCHED_FCFS) {
-        return best->travelerIndex;
-    }
-
-    // SJF: choose the waiting traveler with the shortest next edge/job.
-    while (current != NULL) {
-        int currentJob = get_edge_weight(current->currentNode, current->requestedNode);
-        int bestJob = get_edge_weight(best->currentNode, best->requestedNode);
-
-        if (currentJob < bestJob ||
-            (currentJob == bestJob && current->arrivalTime < best->arrivalTime)) {
-            best = current;
-        }
-
-        current = current->next;
-    }
-
-    return best->travelerIndex;
 }
 
 int queue_has_granted_traveler(int intersection) {
@@ -283,20 +253,34 @@ void grant_waiting_travelers_by_scheduler() {
             continue;
         }
 
-        int selectedTraveler = select_next_traveler_from_queue(node);
-
-        if (selectedTraveler == -1) {
+        if (sem_trywait(&nodeLocks[node]) == -1) {
             continue;
         }
 
-        // Keep WAIT visible briefly in GUI before allowing the traveler to compete for the node lock.
+        QueueNode *selected = choose_next_process(get_waiting_queue(node), schedulerType);
+
+        if (selected == NULL) {
+            sem_post(&nodeLocks[node]);
+            continue;
+        }
+
+        int selectedTraveler = selected->travelerIndex;
+
+        if (selectedTraveler < 0 || selectedTraveler >= travelerCount) {
+            sem_post(&nodeLocks[node]);
+            continue;
+        }
+
+        // Keep WAIT visible briefly in GUI before allowing the traveler to enter the reserved node.
         if (currentTime - travelers[selectedTraveler].waitingStartTime >= 0.2) {
             travelers[selectedTraveler].waitingAckSent = 1;
-            sem_post(&waitShownSync[selectedTraveler]);
+            sem_post(&schedulerSync[selectedTraveler]);
 
             printf("Scheduler %s selected Traveler %d for node %d\n",
                    getSchedulerName(), selectedTraveler, node);
             fflush(stdout);
+        } else {
+            sem_post(&nodeLocks[node]);
         }
     }
 }
@@ -718,17 +702,13 @@ int main(int argc, char *argv[]) {
 
             int currentNode = travelers[i].shortestPath[0];
 
-            if (sem_trywait(&nodeLocks[currentNode]) == -1) {
-                sendMessage(pipes[i][1], i, currentNode, currentNode, STATUS_WAITING, 0);
-                waitSemaphore(&waitShownSync[i]);
-                waitSemaphore(&nodeLocks[currentNode]);
-            }
+            sendMessage(pipes[i][1], i, currentNode, currentNode, STATUS_WAITING, 0);
+            waitSemaphore(&schedulerSync[i]);
 
             sendMessage(pipes[i][1], i, currentNode, currentNode, STATUS_ENTERED, travelers[i].pathLength <= 1);
             waitSemaphore(&insideDoneSync[i]);
 
             if (travelers[i].pathLength <= 1) {
-                sem_post(&nodeLocks[currentNode]);
                 sendMessage(pipes[i][1], i, currentNode, -1, STATUS_FINISHED, 1);
                 close(pipes[i][1]);
                 exit(0);
@@ -740,20 +720,15 @@ int main(int argc, char *argv[]) {
 
                 sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_MOVING, 0);
                 waitSemaphore(&leaveSync[i]);
-                sem_post(&nodeLocks[currentNode]);
                 waitSemaphore(&outsideSync[i]);
 
-                if (sem_trywait(&nodeLocks[nodeToEnter]) == -1) {
-                    sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_WAITING, 0);
-                    waitSemaphore(&waitShownSync[i]);
-                    waitSemaphore(&nodeLocks[nodeToEnter]);
-                }
+                sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_WAITING, 0);
+                waitSemaphore(&schedulerSync[i]);
 
                 sendMessage(pipes[i][1], i, currentNode, nodeToEnter, STATUS_ENTERED, isLastNode);
                 waitSemaphore(&insideDoneSync[i]);
 
                 if (isLastNode) {
-                    sem_post(&nodeLocks[nodeToEnter]);
                     sendMessage(pipes[i][1], i, nodeToEnter, -1, STATUS_FINISHED, 1);
                 } else {
                     currentNode = nodeToEnter;
@@ -896,17 +871,14 @@ int main(int argc, char *argv[]) {
                 if (travelers[i].guiStatus == GUI_STATUS_INSIDE &&
                     !travelers[i].insideReleaseSent &&
                     currentTime - travelers[i].insideStartTime >= 1.0) {
+                    int leavingNode = travelers[i].insideNode;
                     travelers[i].insideReleaseSent = 1;
-                    printf("Traveler %d LEAVING node %d\n", i, travelers[i].insideNode);
+                    printf("Traveler %d LEAVING node %d\n", i, leavingNode);
                     fflush(stdout);
+                    if (leavingNode >= 0 && leavingNode < nodeCount) {
+                        sem_post(&nodeLocks[leavingNode]);
+                    }
                     sem_post(&insideDoneSync[i]);
-                }
-
-                if (travelers[i].guiStatus == GUI_STATUS_WAITING &&
-                    !travelers[i].waitingAckSent &&
-                    currentTime - travelers[i].waitingStartTime >= 0.2) {
-                    travelers[i].waitingAckSent = 1;
-                    sem_post(&waitShownSync[i]);
                 }
 
                 if (travelers[i].animationFinished ||

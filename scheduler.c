@@ -19,7 +19,9 @@ QueueNode* sjf_scheduler(IntersectionQueue *queue)
 
     while (cur)
     {
-        if (cur->remainingPath < best->remainingPath)
+        if (cur->remainingPath < best->remainingPath ||
+            (cur->remainingPath == best->remainingPath &&
+             cur->arrivalTime < best->arrivalTime))
             best = cur;
 
         cur = cur->next;
