@@ -67,7 +67,8 @@ typedef struct {
     int insideReleaseSent;
     int leaveAckSent;
     double waitingStartTime;
-    int waitingAckSent;
+    double totalWaitingTime;   // Milestone 7: total time spent waiting in queues
+    int waitingAckSent;        // 0 = not granted yet, 1 = scheduler already granted permission
     Color color; // a unique color for every traveler
 } Traveler;
 
@@ -135,6 +136,9 @@ double lastMoveTime = 0;
 Color travelerColors[MAX_TRAVELERS] = {
     ORANGE, GOLD, LIME, MAROON, PURPLE, VIOLET, DARKGREEN, PINK, MAGENTA, BEIGE
 };
+
+IntersectionQueue *get_waiting_queue(int intersection);
+const char* getSchedulerName();
 
 const char *statusText(int status) {
     switch (status) {
@@ -208,6 +212,93 @@ void add_to_intersection_queue(int intersection, int travelerIndex, int currentN
 
     printf("Traveler %d added to waiting queue of node %d. Queue size: %d\n",
            travelerIndex, intersection, intersectionQueues[intersection].size);
+}
+
+int get_edge_weight(int src, int dst) {
+    for (int i = 0; i < edgeCount; i++) {
+        if (edges[i].src == src && edges[i].dst == dst) {
+            return edges[i].weight;
+        }
+    }
+
+    return INF;
+}
+
+int select_next_traveler_from_queue(int intersection) {
+    IntersectionQueue *queue = get_waiting_queue(intersection);
+
+    if (queue == NULL || queue->front == NULL) {
+        return -1;
+    }
+
+    QueueNode *current = queue->front;
+    QueueNode *best = current;
+
+    if (schedulerType == SCHED_FCFS) {
+        return best->travelerIndex;
+    }
+
+    // SJF: choose the waiting traveler with the shortest next edge/job.
+    while (current != NULL) {
+        int currentJob = get_edge_weight(current->currentNode, current->requestedNode);
+        int bestJob = get_edge_weight(best->currentNode, best->requestedNode);
+
+        if (currentJob < bestJob ||
+            (currentJob == bestJob && current->arrivalTime < best->arrivalTime)) {
+            best = current;
+        }
+
+        current = current->next;
+    }
+
+    return best->travelerIndex;
+}
+
+int queue_has_granted_traveler(int intersection) {
+    IntersectionQueue *queue = get_waiting_queue(intersection);
+
+    if (queue == NULL) {
+        return 0;
+    }
+
+    QueueNode *current = queue->front;
+    while (current != NULL) {
+        int idx = current->travelerIndex;
+
+        if (idx >= 0 && idx < travelerCount && travelers[idx].waitingAckSent) {
+            return 1;
+        }
+
+        current = current->next;
+    }
+
+    return 0;
+}
+
+void grant_waiting_travelers_by_scheduler() {
+    double currentTime = GetTime();
+
+    for (int node = 0; node < nodeCount; node++) {
+        if (is_intersection_queue_empty(node) || queue_has_granted_traveler(node)) {
+            continue;
+        }
+
+        int selectedTraveler = select_next_traveler_from_queue(node);
+
+        if (selectedTraveler == -1) {
+            continue;
+        }
+
+        // Keep WAIT visible briefly in GUI before allowing the traveler to compete for the node lock.
+        if (currentTime - travelers[selectedTraveler].waitingStartTime >= 0.2) {
+            travelers[selectedTraveler].waitingAckSent = 1;
+            sem_post(&waitShownSync[selectedTraveler]);
+
+            printf("Scheduler %s selected Traveler %d for node %d\n",
+                   getSchedulerName(), selectedTraveler, node);
+            fflush(stdout);
+        }
+    }
 }
 
 int remove_from_intersection_queue(int intersection, int travelerIndex) {
@@ -504,6 +595,7 @@ int main(int argc, char *argv[]) {
         travelers[i].insideReleaseSent = 0;
         travelers[i].leaveAckSent = 0;
         travelers[i].waitingStartTime = 0;
+        travelers[i].totalWaitingTime = 0;
         travelers[i].waitingAckSent = 0;
         travelers[i].color = travelerColors[i % MAX_TRAVELERS];
 
@@ -735,6 +827,14 @@ int main(int argc, char *argv[]) {
 
                   printf("Traveler %d WAITING outside node %d\n", idx, msg.nextNode);
               } else if (msg.status == STATUS_ENTERED) {
+                  if (travelers[idx].waitingStartTime > 0) {
+                      double waited = GetTime() - travelers[idx].waitingStartTime;
+                      travelers[idx].totalWaitingTime += waited;
+                      printf("Traveler %d waited %.2f seconds before entering node %d. Total waiting time: %.2f seconds\n",
+                             idx, waited, msg.nextNode, travelers[idx].totalWaitingTime);
+                      travelers[idx].waitingStartTime = 0;
+                  }
+
                   remove_from_intersection_queue(msg.nextNode, idx);
 
                   travelers[idx].waitingForNode = -1;
@@ -763,7 +863,8 @@ int main(int argc, char *argv[]) {
                       travelers[idx].entityY = positions[msg.currentNode].y;
                   }
 
-                  printf("[PID=%d] finished\n", msg.pid);
+                  printf("[PID=%d] finished. Traveler %d total waiting time: %.2f seconds\n",
+                         msg.pid, idx, travelers[idx].totalWaitingTime);
               }
 
               fflush(stdout);
@@ -858,6 +959,8 @@ int main(int argc, char *argv[]) {
                 }
             }
 
+            grant_waiting_travelers_by_scheduler();
+
             if (currentTime - lastMoveTime >= 0.3) {
                 lastMoveTime = currentTime;
             }
@@ -926,10 +1029,14 @@ int main(int argc, char *argv[]) {
         }
 
         // Display a small side panel showing the status of each child (PID)
-        DrawRectangle(40, 90, 320, travelerCount * 25 + 10, Fade(LIGHTGRAY, 0.8f));
+        DrawRectangle(40, 90, 420, travelerCount * 25 + 10, Fade(LIGHTGRAY, 0.8f));
         for (int i = 0; i < travelerCount; i++) {
             DrawCircle(55, 105 + i * 25, 7, travelers[i].color);
-            DrawText(TextFormat("PID: %d  %s", travelers[i].pid, statusText(travelers[i].guiStatus)), 70, 95 + i * 25, 16, BLACK);
+            DrawText(TextFormat("PID: %d  %s  WT: %.2f",
+                                travelers[i].pid,
+                                statusText(travelers[i].guiStatus),
+                                travelers[i].totalWaitingTime),
+                     70, 95 + i * 25, 16, BLACK);
         }
 
         EndDrawing();
@@ -969,6 +1076,12 @@ int main(int argc, char *argv[]) {
     munmap(insideDoneSync, sizeof(sem_t) * travelerCount);
     munmap(schedulerSync, sizeof(sem_t) * travelerCount);
     munmap(childrenReady, sizeof(sem_t));
+
+    printf("\n=== Waiting Time Statistics (%s) ===\n", getSchedulerName());
+    for (int i = 0; i < travelerCount; i++) {
+        printf("Traveler %d total waiting time: %.2f seconds\n",
+               i, travelers[i].totalWaitingTime);
+    }
 
     printf("Parent Process finished safely.\n");
     return 0;
