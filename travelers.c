@@ -50,6 +50,7 @@ typedef struct {
     int currentNode;
     int nextNode;
     int finished;
+    int noPath;
     pid_t pid;
 } Message;
 
@@ -225,6 +226,21 @@ int main(int argc, char *argv[]) {
 
             runDijkstraForTraveler(i);
 
+            if (travelers[i].pathLength == 0) {
+                Message msg;
+
+                msg.travelerIndex = i;
+                msg.currentNode = travelers[i].sourceNode;
+                msg.nextNode = travelers[i].destinationNode;
+                msg.finished = 1;
+                msg.noPath = 1;
+                msg.pid = getpid();
+
+                write(pipes[i][1], &msg, sizeof(Message));
+                close(pipes[i][1]);
+                exit(0);
+            }
+
             //  (Child Process)
             // printf("[%d] started\n", getpid());
             // fflush(stdout);
@@ -242,7 +258,9 @@ int main(int argc, char *argv[]) {
                     msg.nextNode = -1;
 
                 msg.finished = (p == travelers[i].pathLength - 1);
+                msg.noPath = 0;
                 msg.pid = getpid();
+
 
                 write(pipes[i][1], &msg, sizeof(Message));
 
@@ -275,6 +293,13 @@ int main(int argc, char *argv[]) {
           Message msg;
 
           if (read(pipes[i][0], &msg, sizeof(Message)) > 0) {
+              if (msg.noPath) {
+                  printf("[PID=%d] Traveler %d has no path from node %d to node %d\n",
+                         msg.pid, msg.travelerIndex, msg.currentNode, msg.nextNode);
+                  travelers[msg.travelerIndex].animationFinished = 1;
+                  fflush(stdout);
+                  continue;
+              }
             if (msg.nextNode != -1)
                 printf("[PID=%d] arrived at node %d | next node: %d\n",
                        msg.pid, msg.currentNode, msg.nextNode);
